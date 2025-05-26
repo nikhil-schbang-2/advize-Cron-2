@@ -1,5 +1,6 @@
 from celery import Celery
 from celery.schedules import crontab
+from app.config import CELERY_BROKER, CELERY_BACKEND
 
 INCLUDE = [
     "app.insights_async",
@@ -7,8 +8,8 @@ INCLUDE = [
 
 celery = Celery(
     "tasks",
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/0",
+    broker=CELERY_BROKER,
+    backend=CELERY_BACKEND,
     include=INCLUDE,
 )
 
@@ -28,6 +29,6 @@ celery.conf.update(
 celery.conf.beat_schedule = {
     "update-ad-insights": {
         "task": "app.insights_async.update_ad_insights",
-        "schedule": crontab(minute="*/10"),
+        "schedule": crontab(hour=0, minute=0),
     },
 }

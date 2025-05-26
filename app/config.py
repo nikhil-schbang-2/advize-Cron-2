@@ -41,3 +41,8 @@ IMAGE_URL_COLUMN = "asset_link"
 VIDEO_TABLE = "dim_video_creative"
 VIDEO_ID_COLUMN = "video_id"
 VIDEO_URL_COLUMN = "asset_link"
+
+
+# celery
+CELERY_BROKER = os.getenv("CELERY_BROKER","redis://localhost:6379/0")
+CELERY_BACKEND = os.getenv("CELERY_BACKEND","redis://localhost:6379/0")
