@@ -1174,7 +1174,7 @@ def update_ad_insights():
         account_query = """SELECT account_id FROM dim_account WHERE is_active = true"""
         result = db.execute(account_query).fetchall()
         # days = [1,7,15,30,90, 180, 365]
-        DAYS = 2
+        DAYS = 365
 
         for active_account in result:
             account_id = active_account["account_id"]
