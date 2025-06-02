@@ -1,10 +1,12 @@
 import asyncio
+import hashlib
 import json
 import random
 import os
 import traceback
 from datetime import date, datetime, timedelta
 import logging
+import uuid
 import boto3
 from botocore.exceptions import ClientError, EndpointConnectionError, NoCredentialsError
 import requests
@@ -20,6 +22,7 @@ from typing import List, Dict, Any, Set
 import psycopg2 as psy
 
 from app.config import META_API_KEY, S3_BUCKET_NAME
+from app.video_fetcher import get_carousel_images_from_facebook_iframe
 from database.db import Database
 from app.fact_table import upsert_dimension
 from app.tasks import (
@@ -168,7 +171,7 @@ def fetch_ads_in_batches(
     return all_ads
 
 
-def process_and_insert_insights(insights_data, time_window_key, account_id, db: Database):
+def process_and_insert_insights(insights_data, time_window_key, account_id, ad_id_to_skip, db: Database):
     """
     Processes fetched insights data and inserts it into the fact table.
     Discovers and upserts dimension values as they are encountered.
@@ -182,13 +185,11 @@ def process_and_insert_insights(insights_data, time_window_key, account_id, db: 
         return
     
     rows_to_insert = []
-
     for row in insights_data:
         try:
             ad_id = int(row.get("ad_id"))
-
-            # This condition is only for account id: 841473654502812
-            if ad_id in [120217380875130251, 120217444539950251]:
+            # This will skip those ads which have creative type unknown
+            if ad_id_to_skip and ad_id in ad_id_to_skip:
                 continue
 
             adset_id = row.get("adset_id")
@@ -365,11 +366,11 @@ def process_and_insert_insights(insights_data, time_window_key, account_id, db: 
 
     if rows_to_insert:
         try:
-            upsert_partition_atomic(account_id, rows_to_insert, db)
-
             log_message(
                 f"Successfully inserted/updated {len(rows_to_insert)} rows for breakdown account."
             )
+            return rows_to_insert
+
         except Exception as e:
             log_message(
                 "\n--- Database insertion error for breakdown account ---",
@@ -393,77 +394,78 @@ def process_and_insert_insights(insights_data, time_window_key, account_id, db: 
         log_message("No valid rows to insert for breakdown account.")
 
 
-def upsert_partition_atomic(account_id, rows_to_insert, db: Database):
-    timestamp = time.strftime("%Y%m%d%H%M%S")
-    new_table = f"fact_ad_metrics_aggregated_acct_{account_id}_tmp_{timestamp}"
-    final_table = f"fact_ad_metrics_aggregated_acct_{account_id}"
+def upsert_partition_atomic(new_table, rows_to_insert, db: Database):
+    try:    
+        # Bulk insert into the new table
+        insert_stmt = f"""
+            INSERT INTO {new_table} (
+                time_window, start_date, end_date, ad_id, account_id, adset_id, campaign_id,
+                region_id, age_id, gender_id, platform_id, placement_id, impression_device_id,
+                breakdown_type,
+                amount_spent, video_plays_3s, impressions, reach, thruplays,
+                link_click, landing_page_view, purchase, lead, post_reaction, post_shares, post_save,
+                purchase_revenue, lead_revenue,
+                custom_metrics, created_at
+            ) VALUES %s
+                ON CONFLICT (time_window,ad_id,adset_id,campaign_id,account_id,region_id,age_id,gender_id,
+                    platform_id,impression_device_id,breakdown_type,placement_id
+                )
+            DO UPDATE SET
+                amount_spent = EXCLUDED.amount_spent,
+                video_plays_3s = EXCLUDED.video_plays_3s,
+                impressions = EXCLUDED.impressions,
+                reach = EXCLUDED.reach,
+                thruplays = EXCLUDED.thruplays,
+                link_click = EXCLUDED.link_click,
+                landing_page_view = EXCLUDED.landing_page_view,
+                purchase = EXCLUDED.purchase,
+                lead = EXCLUDED.lead,
+                post_reaction = EXCLUDED.post_reaction,
+                post_shares = EXCLUDED.post_shares,
+                post_save = EXCLUDED.post_save,
+                purchase_revenue = EXCLUDED.purchase_revenue,
+                lead_revenue = EXCLUDED.lead_revenue,
+                custom_metrics = EXCLUDED.custom_metrics,
+                created_at = EXCLUDED.created_at;
+        """
+        db.bulk_execute_values(insert_stmt, rows_to_insert)
+    except Exception as e:
+        print(f"[DB ERROR] Atomic swap failed: {e}")
+        raise e
 
-    # Create unlogged staging table
-    db.execute(f"""
-        CREATE UNLOGGED TABLE {new_table}
-        (LIKE fact_ad_metrics_aggregated INCLUDING DEFAULTS INCLUDING CONSTRAINTS);
-    """)
 
-    # Bulk insert into the new table
-    insert_stmt = f"""
-        INSERT INTO {new_table} (
-            time_window, start_date, end_date, ad_id, account_id, adset_id, campaign_id,
-            region_id, age_id, gender_id, platform_id, placement_id, impression_device_id,
-            breakdown_type,
-            amount_spent, video_plays_3s, impressions, reach, thruplays,
-            link_click, landing_page_view, purchase, lead, post_reaction, post_shares, post_save,
-            purchase_revenue, lead_revenue,
-            custom_metrics, created_at
-        ) VALUES %s
-    """
-    db.bulk_execute_values(insert_stmt, rows_to_insert)
-
-    # Create indexes (optional but recommended)
-    db.execute(f"CREATE INDEX ON {new_table} (time_window, breakdown_type);")
-    db.execute(f"CREATE INDEX ON {new_table} (ad_id);")
-    db.execute(f"ANALYZE {new_table};")
-
-    # Begin atomic swap
+def atomic_swap(final_table, new_table, account_id, db):
     try:
-        # Check and detach + drop existing partition
+        # Detach existing partition if it exists
         db.execute(f"""
             DO $$
-            DECLARE
-                rel_exists BOOLEAN;
             BEGIN
-                SELECT EXISTS (
-                    SELECT 1 FROM pg_class WHERE relname = '{final_table}'
-                ) INTO rel_exists;
-
-                IF rel_exists THEN
-                    BEGIN
-                        EXECUTE format(
-                            'ALTER TABLE fact_ad_metrics_aggregated DETACH PARTITION %I',
-                            '{final_table}'
-                        );
-                    EXCEPTION WHEN others THEN
-                        -- Ignore if already detached or not a partition
-                        NULL;
-                    END;
-
-                    -- Drop the old table
-                    EXECUTE format(
-                        'DROP TABLE IF EXISTS %I',
-                        '{final_table}'
-                    );
+                IF EXISTS (
+                    SELECT 1 FROM pg_class c
+                    JOIN pg_partitioned_table p ON p.partrelid = 'fact_ad_metrics_aggregated'::regclass
+                    JOIN pg_inherits i ON i.inhparent = p.partrelid
+                    JOIN pg_class pc ON pc.oid = i.inhrelid
+                    WHERE pc.relname = '{final_table}'
+                ) THEN
+                    EXECUTE format('ALTER TABLE fact_ad_metrics_aggregated DETACH PARTITION %I', '{final_table}');
                 END IF;
             END$$;
         """)
 
-        # Rename staging to final
-        db.execute(f"ALTER TABLE {new_table} RENAME TO {final_table};")
+        # Drop the old final table if needed (optional safety step)
+        db.execute(f"DROP TABLE IF EXISTS {final_table}", commit=True)
+        
+        # Rename staging table to final table
+        db.execute(f"""ALTER TABLE {new_table} RENAME TO {final_table};""", commit = True)
 
-        # Attach partition — inject account_id directly, must be integer
+        # Attach the new table as a partition
         db.execute(f"""
             ALTER TABLE fact_ad_metrics_aggregated
             ATTACH PARTITION {final_table} FOR VALUES IN ({account_id});
-        """)
+        """, commit=True)
         
+        # Optional: disable autovacuum for this partition
+        db.execute(f"""ALTER TABLE {final_table} SET (autovacuum_enabled = false);""")
         db.conn.commit()
     except Exception as e:
         print(f"[DB ERROR] Atomic swap failed: {e}")
@@ -481,6 +483,7 @@ def save_ad_creatives(all_ad_data, account_id, db: Database):
     all_image_hashes: Set[str] = set()
     campaigns_to_process: Dict[int, Dict[str, Any]] = {}
     adsets_to_process: Dict[int, Dict[str, Any]] = {}
+    unknow_creative_ad_id = []
 
     for ad_data in all_ad_data:
         ad_id_str = ad_data.get("id")
@@ -488,7 +491,6 @@ def save_ad_creatives(all_ad_data, account_id, db: Database):
 
         campaign = ad_data.get("campaign", {})
         campaign_id_str = campaign.get("id")
-        print(f"==>> campaign_id_str: {campaign_id_str}")
         if campaign_id_str:
             try:
                 campaign_id = int(campaign_id_str)
@@ -757,6 +759,10 @@ def save_ad_creatives(all_ad_data, account_id, db: Database):
             if processed_ad_id is None:
                 errors_occurred_linking = True
             else:
+                if isinstance(processed_ad_id, tuple):
+                    processed_ad_id = processed_ad_id[0]
+                    unknow_creative_ad_id.append(processed_ad_id)
+
                 creative_data = ad_data.get("creative", {})
                 if (
                     creative_data
@@ -838,6 +844,7 @@ def save_ad_creatives(all_ad_data, account_id, db: Database):
         "meta_image_urls_fetched_in_batch": len(hash_url_map),
         "images_uploaded_to_s3": len(s3_url_map),
         "total_ads_retrieved": len(all_ad_data),
+        "unknow_creative_ad_id": unknow_creative_ad_id,
     }
 
 
@@ -851,7 +858,6 @@ def delete_ad_and_creatives(ad_and_adset_id: List[str], account_id: int, db: Dat
     try:
         # Fetch all ad details in one query
         for i in range(0, len(ad_and_adset_id), 100):
-            print(f"==>> Batch executing..: {i}")
             batch = ad_and_adset_id[i : i + 100]
             ad_query = """SELECT  adset_id, ad_id, video_id, image_hash, creative_type 
                     FROM dim_ad WHERE ad_id NOT IN %s AND account_id = %s
@@ -861,14 +867,11 @@ def delete_ad_and_creatives(ad_and_adset_id: List[str], account_id: int, db: Dat
             cursor = db.execute(
                 ad_query,
                 (
-                   tuple(ad_id for ad_id in batch),
+                   tuple(batch),
                     account_id,
                     100 * i,
                 ),
             )
-            if not cursor:
-                print("Nothing to delete")
-                return None
             
             ads = cursor.fetchall()
 
@@ -876,130 +879,127 @@ def delete_ad_and_creatives(ad_and_adset_id: List[str], account_id: int, db: Dat
                 print("No matching ads found.")
                 continue
 
-            print(f"==>> ads: {ads}")
+            print("ads data for delete started ====================>")
+            deleted_assets_campaign_ids = set()
+            deleted_image_hash = set()
+            deleted_video_id = set()
 
-            # print("ads data for delete started ====================>")
-            # deleted_assets_campaign_ids = set()
-            # deleted_image_hash = set()
-            # deleted_video_id = set()
+            # Collect creative references
+            video_ids = [ad["video_id"] for ad in ads if ad["creative_type"] == "video" and ad["video_id"]]
+            image_hashes = [ad["image_hash"] for ad in ads if ad["creative_type"] == "image" and ad["image_hash"]]
 
-            # # Collect creative references
-            # video_ids = [ad["video_id"] for ad in ads if ad["creative_type"] == "video" and ad["video_id"]]
-            # print(f"==>> video_ids: {video_ids}")
-            # image_hashes = [ad["image_hash"] for ad in ads if ad["creative_type"] == "image" and ad["image_hash"]]
+            # Delete from creatives
+            if video_ids:
+                delete_creatives_from_s3(
+                    db=db,
+                    s3=s3,
+                    s3_prefix="meta-creatives/videos",
+                    query="""
+                        SELECT dvc.asset_link, dvc.video_id, da.ad_id, da.adset_id, dc.campaign_id
+                        FROM dim_video_creative AS dvc
+                        JOIN dim_ad AS da ON dvc.video_id = da.video_id
+                        JOIN dim_adset AS dc ON da.adset_id = dc.adset_id
+                        WHERE dvc.video_id IN %s AND da.account_id = %s;
+                    """,
+                    query_params=(
+                        tuple(video_ids),
+                        account_id,
+                    ),
+                    deleted_assets_campaign_ids=deleted_assets_campaign_ids,
+                    deleted_video_id=deleted_video_id,
+                )
+                log_message(
+                    f"video_ids deleted from s3: {','.join(map(str, video_ids))}"
+                )
 
-            # # Delete from creatives
-            # if video_ids:
-            #     delete_creatives_from_s3(
-            #         db=db,
-            #         s3=s3,
-            #         s3_prefix="meta-creatives/videos",
-            #         query="""
-            #             SELECT dvc.asset_link, dvc.video_id, da.ad_id, da.adset_id, dc.campaign_id
-            #             FROM dim_video_creative AS dvc
-            #             JOIN dim_ad AS da ON dvc.video_id = da.video_id
-            #             JOIN dim_adset AS dc ON da.adset_id = dc.adset_id
-            #             WHERE dvc.video_id IN %s AND da.account_id = %s;
-            #         """,
-            #         query_params=(
-            #             tuple(video_ids),
-            #             account_id,
-            #         ),
-            #         deleted_assets_campaign_ids=deleted_assets_campaign_ids,
-            #         deleted_video_id=deleted_video_id,
-            #     )
-            #     log_message(
-            #         f"video_ids deleted from s3: {','.join(map(str, video_ids))}"
-            #     )
+            if image_hashes:
+                delete_creatives_from_s3(
+                    db=db,
+                    s3=s3,
+                    s3_prefix="meta-creatives/images",
+                    query="""
+                        SELECT dic.asset_link, dic.image_hash, da.ad_id, da.adset_id, dc.campaign_id
+                        FROM dim_image_creative AS dic
+                        JOIN dim_ad AS da ON dic.image_hash = da.image_hash
+                        JOIN dim_adset AS dc ON da.adset_id = dc.adset_id
+                        WHERE dic.image_hash IN %s AND da.account_id = %s;
+                    """,
+                    query_params=(
+                       tuple(image_hashes),
+                        account_id,
+                    ),
+                    deleted_assets_campaign_ids=deleted_assets_campaign_ids,
+                    deleted_image_hash=deleted_image_hash,
+                )
+                log_message(f"image_hashes deleted from s3: {','.join(image_hashes)}")
 
-            # if image_hashes:
-            #     delete_creatives_from_s3(
-            #         db=db,
-            #         s3=s3,
-            #         s3_prefix="meta-creatives/images",
-            #         query="""
-            #             SELECT dic.asset_link, dic.image_hash, da.ad_id, da.adset_id, dc.campaign_id
-            #             FROM dim_image_creative AS dic
-            #             JOIN dim_ad AS da ON dic.image_hash = da.image_hash
-            #             JOIN dim_adset AS dc ON da.adset_id = dc.adset_id
-            #             WHERE dic.image_hash IN %s AND da.account_id = %s;
-            #         """,
-            #         query_params=(
-            #            tuple(image_hashes),
-            #             account_id,
-            #         ),
-            #         deleted_assets_campaign_ids=deleted_assets_campaign_ids,
-            #         deleted_image_hash=deleted_image_hash,
-            #     )
-            #     log_message(f"image_hashes deleted from s3: {','.join(image_hashes)}")
+            if deleted_assets_campaign_ids and (deleted_image_hash or deleted_video_id):
+                try:
+                    # Delete from dim_campaign
+                    db.execute(
+                            """DELETE FROM dim_campaign WHERE campaign_id IN %s AND account_id = %s""",
+                            (
+                                tuple(deleted_assets_campaign_ids),
+                                account_id,
+                            )
+                        )
 
-            # if deleted_assets_campaign_ids and (deleted_image_hash or deleted_video_id):
-            #     try:
-            #         # Delete from dim_campaign
-            #         db.execute(
-            #                 """DELETE FROM dim_campaign WHERE campaign_id IN %s AND account_id = %s""",
-            #                 (
-            #                     tuple(deleted_assets_campaign_ids),
-            #                     account_id,
-            #                 )
-            #             )
+                    if deleted_image_hash:
+                        log_message(
+                            f"==>>  Image row deleted from the database:: {','.join(map(str, deleted_image_hash))}"
+                        )
 
-            #         if deleted_image_hash:
-            #             log_message(
-            #                 f"==>>  Image row deleted from the database:: {','.join(map(str, deleted_image_hash))}"
-            #             )
+                         # Delete from dim_creative_card
+                        db.execute(
+                            "DELETE FROM dim_creative_card WHERE image_hash IN %s AND account_id = %s",
+                            (
+                                tuple(deleted_image_hash),
+                                account_id,
+                            ),
+                        )
 
-            #              # Delete from dim_creative_card
-            #             db.execute(
-            #                 "DELETE FROM dim_creative_card WHERE image_hash IN %s AND account_id = %s",
-            #                 (
-            #                     tuple(deleted_image_hash),
-            #                     account_id,
-            #                 ),
-            #             )
+                        # Delete from dim_image_creative
+                        db.execute(
+                            "DELETE FROM dim_image_creative WHERE image_hash IN %s AND account_id = %s",
+                            (
+                                tuple(deleted_image_hash),
+                                account_id,
+                            ),
+                        )
 
-            #             # Delete from dim_image_creative
-            #             db.execute(
-            #                 "DELETE FROM dim_image_creative WHERE image_hash IN %s AND account_id = %s",
-            #                 (
-            #                     tuple(deleted_image_hash),
-            #                     account_id,
-            #                 ),
-            #             )
+                    if deleted_video_id:
+                        log_message(
+                            f"==>> Video row deleted from the database: {','.join(map(str, deleted_video_id))}"
+                        )
 
-            #         if deleted_video_id:
-            #             log_message(
-            #                 f"==>> Video row deleted from the database: {','.join(map(str, deleted_video_id))}"
-            #             )
+                        # Delete from dim_creative_card where video_id
+                        db.execute(
+                            "DELETE FROM dim_creative_card WHERE video_id IN %s AND account_id = %s",
+                            (
+                                tuple(deleted_video_id),
+                                account_id,
+                            ),
+                        )
 
-            #             # Delete from dim_creative_card where video_id
-            #             db.execute(
-            #                 "DELETE FROM dim_creative_card WHERE video_id IN %s AND account_id = %s",
-            #                 (
-            #                     tuple(deleted_video_id),
-            #                     account_id,
-            #                 ),
-            #             )
+                        # Delete from dim_video_creative
+                        db.execute(
+                            "DELETE FROM dim_video_creative WHERE video_id IN %s AND account_id = %s",
+                            (
+                                tuple(deleted_video_id),
+                                account_id,
+                            ),
+                        )
 
-            #             # Delete from dim_video_creative
-            #             db.execute(
-            #                 "DELETE FROM dim_video_creative WHERE video_id IN %s AND account_id = %s",
-            #                 (
-            #                     tuple(deleted_video_id),
-            #                     account_id,
-            #                 ),
-            #             )
+                    db.conn.commit()
 
-            #         db.conn.commit()
+                except Exception as e:
+                    db.conn.rollback()
+                    log_message("Deletion failed:", e)
+                    raise
 
-            #     except Exception as e:
-            #         db.rollback()
-            #         log_message("Deletion failed:", e)
-            #         raise
-
-            #     log_message(
-            #         f"Data Deleted, which was already in the database.\n Campaign Id {','.join(map(str, deleted_assets_campaign_ids))}"
-            #     )
+                log_message(
+                    f"Data Deleted, which was already in the database.\n Campaign Id {','.join(map(str, deleted_assets_campaign_ids))}"
+                )
 
         return {"status": "success", "deleted_ads": len(ads)}
 
@@ -1024,7 +1024,7 @@ def delete_creatives_from_s3(
             if not asset["asset_link"]:
                 continue
 
-            object_key = f"{s3_prefix}/{asset["asset_link"].split('/')[-1]}"
+            object_key = f"{s3_prefix}/{asset['asset_link'].split('/')[-1]}"
             s3_delete_status = s3.delete_object(Bucket=S3_BUCKET_NAME, Key=object_key)
 
             if (
@@ -1032,7 +1032,7 @@ def delete_creatives_from_s3(
                 and s3_delete_status.get("ResponseMetadata", {}).get("HTTPStatusCode")
                 == 204
             ):
-                is_video = s3_prefix.split('/')[-1] == 'video'
+                is_video = s3_prefix.split('/')[-1] == 'videos'
                 
                 if not is_video:
                     deleted_image_hash.add(asset["image_hash"])
@@ -1173,12 +1173,40 @@ def update_ad_insights():
     try:
         account_query = """SELECT account_id FROM dim_account WHERE is_active = true"""
         result = db.execute(account_query).fetchall()
+<<<<<<< Updated upstream
         # days = [1,7,15,30,90, 180, 365]
+=======
+>>>>>>> Stashed changes
         DAYS = 365
 
         for active_account in result:
+
+            ad_id_to_skip = list()
             account_id = active_account["account_id"]
-            print(f"==>> account_id: {account_id}")
+            
+            timestamp = time.strftime("%Y%m%d%H%M%S")
+            new_table = f"fact_acct_{account_id}_tmp_{timestamp}"
+            final_table = f"fact_ad_metrics_aggregated_acct_{account_id}"
+            constraint_name = f"unique_fact_keys_{account_id}_{timestamp}"
+
+            # delete existing table
+            db.execute(f"""DROP TABLE IF EXISTS {new_table}""")
+
+            # Create unlogged staging table
+            db.execute(f"""
+                CREATE UNLOGGED TABLE {new_table}
+                (LIKE fact_ad_metrics_aggregated INCLUDING DEFAULTS);
+            """, commit=True)
+            print("Table created ", new_table)
+            # Drop constraint if exists
+            db.execute(f"""ALTER TABLE {new_table} DROP CONSTRAINT IF EXISTS {constraint_name};""", commit=True)
+
+            # Add composite unique constraint
+            db.execute(f"""
+                ALTER TABLE {new_table} 
+                ADD CONSTRAINT {constraint_name} UNIQUE (time_window,ad_id,adset_id,campaign_id,account_id,region_id,age_id,gender_id,platform_id,impression_device_id,breakdown_type,placement_id);
+            """, commit=True)
+
             log_message(f"Syncing started with account id: {account_id}")
 
             today_fact = date.today()
@@ -1217,21 +1245,15 @@ def update_ad_insights():
                     row["ad_id"] for row in all_insights_data if row.get("ad_id")
                 )
 
-
+                print("unique ads ids ", list(unique_ad_ids))
                 delete_ad_and_creatives(list(unique_ad_ids), account_id, db)
 
                 # Filter ads data
                 ads_data = filter_ads_data(ACCESS_TOKEN, account_id, 1)
-                print(f"==>> ads_data: {len(ads_data)}")
-                save_ad_creatives(ads_data, account_id, db)
-
+                saved_creative_data = save_ad_creatives(ads_data, account_id, db)
+                ad_id_to_skip = saved_creative_data.get("unknow_creative_ad_id") or []
                 last_updated_ads = set(row["id"] for row in ads_data if row.get("id"))
-
-                # insights_ads_id = set(
-                #     row["ad_id"] for row in all_insights_data if row.get("ad_id")
-                # )
                 ad_ids = list(unique_ad_ids - last_updated_ads)
-                print(f"==>> ad_ids: {len(ad_ids)}")
 
                 ads_data = fetch_ads_in_batches(
                     ad_ids,
@@ -1245,14 +1267,21 @@ def update_ad_insights():
                     ],
                 )
 
-                save_ad_creatives(ads_data, account_id, db)
-
-                process_and_insert_insights(
+                saved_creative_data = save_ad_creatives(ads_data, account_id, db)
+                ad_id_to_skip.extend(saved_creative_data.get("unknow_creative_ad_id") or [])
+                rows_to_insert = process_and_insert_insights(
                     all_insights_data,
                     f"{DAYS}d",
                     account_id,
+                    ad_id_to_skip,
                     db,
                 )
+                if rows_to_insert:
+                    upsert_partition_atomic(new_table, rows_to_insert, db)
+                    atomic_swap(final_table=final_table, new_table=new_table, account_id=account_id, db=db)
+                    db.execute(f"""DROP TABLE IF EXISTS {new_table}""", commit=True)
+                    
+
                 log_message(f"Sync completed for account id: {account_id}")
 
             except Exception as acc_error:
@@ -1260,3 +1289,5 @@ def update_ad_insights():
 
     except Exception as outer_error:
         log_message(f"Fatal error during update_ad_insights: {outer_error}")
+
+

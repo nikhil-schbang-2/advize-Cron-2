@@ -5,3 +5,4 @@ logs/
 celerybeat-schedule.db
 dump.rdb
 .idea
+facebook_iframe.png

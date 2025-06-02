@@ -3,7 +3,7 @@ import os
 import logging
 import json
 import re
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Route, Response
 from typing import Optional, List
 
 # Set up logging for this module
@@ -346,21 +346,48 @@ async def get_main_image_from_facebook_iframe(iframe_url: str) -> Optional[str]:
         return None
 
 
-async def get_all_images_from_facebook_iframe(iframe_url: str) -> List[str]:
+async def get_carousel_images_from_facebook_iframe(
+    iframe_url: str, max_images: Optional[int] = None
+):
     """
-    Extracts all direct image URLs from a Facebook iframe, including those with initiator "image/".
+    Extracts carousel image URLs from a Facebook iframe URL by scraping <img> tags
+    within the carousel container (div[class*='_8f73']), with a fallback to network
+    responses with content-type: image/*.
 
     Args:
         iframe_url (str): The Facebook iframe preview URL.
+        max_images (Optional[int]): Maximum number of images to return (default: None, returns all).
 
     Returns:
-        List[str]: All collected image URLs.
+        Optional[List[str]]: List of carousel image URLs, or None if none found.
     """
-    image_sources = set()
+    image_urls = set()
+
+    async def capture_network_images(response: Response) -> None:
+        """Capture images from network responses with content-type: image/* as a fallback."""
+        url = response.url
+        content_type = response.headers.get("content-type", "").lower()
+
+        try:
+            if (
+                "image/" in content_type
+                and re.search(r"\.(jpg|jpeg|png|webp|gif|avif)", url, re.I)
+                and "static.xx.fbcdn.net" not in url
+                and "/images/vault/" not in url
+                and "logo" not in url.lower()
+                and "icon" not in url.lower()
+                and not url.endswith("header-background-2x.png")
+            ):
+                logger.info(
+                    f"Captured network image: {url} (content-type: {content_type})"
+                )
+                image_urls.add(url)
+        except Exception as e:
+            logger.debug(f"Error processing response: {url} - {e}")
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
+            browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -369,49 +396,97 @@ async def get_all_images_from_facebook_iframe(iframe_url: str) -> List[str]:
             )
             page = await context.new_page()
 
-            # Capture network-loaded images (initiator = "image/")
-            def handle_request_finished(request):
-                if request.resource_type == "image":
-                    url = request.url
-                    if "logo" not in url.lower() and "icon" not in url.lower():
-                        image_sources.add(url)
-                        logger.info(f"🖼️ Image via network: {url}")
-
-            page.on("requestfinished", handle_request_finished)
+            # Capture network responses as a fallback
+            page.on(
+                "response",
+                lambda response: asyncio.create_task(capture_network_images(response)),
+            )
 
             logger.info(f"Navigating to: {iframe_url}")
             await page.goto(iframe_url, timeout=90000, wait_until="load")
+
+            # Wait for page to stabilize
             await page.wait_for_load_state("networkidle", timeout=30000)
 
-            # Fallback: extract from DOM in case some aren't caught via network
-            og_image = await page.get_attribute('meta[property="og:image"]', "content")
-            if og_image:
-                image_sources.add(og_image)
-
-            for img in await page.query_selector_all("img"):
+            # Scrape <img> tags within the carousel container
+            carousel_selector = "div[class*='_8f73'] img"
+            images = await page.query_selector_all(carousel_selector)
+            for img in images:
                 src = await img.get_attribute("src")
-                if src and "logo" not in src.lower() and "icon" not in src.lower():
-                    image_sources.add(src)
+                if (
+                    src
+                    and "logo" not in src.lower()
+                    and "icon" not in src.lower()
+                    and "static.xx.fbcdn.net" not in src
+                    and "/images/vault/" not in src
+                    and not src.endswith("header-background-2x.png")
+                    and re.search(r"\.(jpg|jpeg|png|webp|gif|avif)", src, re.I)
+                ):
+                    logger.info(
+                        f"Captured DOM image: {src} (selector: {carousel_selector})"
+                    )
+                    image_urls.add(src)
 
-            # CSS background images
-            bg_images = await page.evaluate("""() => {
-                const images = new Set();
-                document.querySelectorAll('*').forEach(el => {
-                    const bg = window.getComputedStyle(el).backgroundImage;
-                    if (bg && bg.startsWith('url(')) {
-                        const url = bg.slice(4, -1).replace(/["']/g, "");
-                        if (url.startsWith('http')) images.add(url);
-                    }
-                });
-                return Array.from(images);
-            }""")
-            image_sources.update(bg_images)
+            # Fallback: Broader selector if carousel selector yields no results
+            if not image_urls:
+                logger.debug(
+                    "No images found with carousel selector, trying all <img> tags"
+                )
+                images = await page.query_selector_all("img")
+                for img in images:
+                    src = await img.get_attribute("src")
+                    if (
+                        src
+                        and "logo" not in src.lower()
+                        and "icon" not in src.lower()
+                        and "static.xx.fbcdn.net" not in src
+                        and "/images/vault/" not in src
+                        and not src.endswith("header-background-2x.png")
+                        and re.search(r"\.(jpg|jpeg|png|webp|gif|avif)", src, re.I)
+                    ):
+                        logger.info(f"Captured DOM image (fallback): {src}")
+                        image_urls.add(src)
+
+            # Fallback: Network responses if DOM yields too few images
+            if not image_urls or (max_images and len(image_urls) < max_images):
+                logger.debug(
+                    "DOM scraping yielded insufficient images, using network fallback"
+                )
+                for _ in range((max_images or 2) - len(image_urls)):
+                    try:
+                        await page.wait_for_response(
+                            lambda res: "image/"
+                            in res.headers.get("content-type", "").lower()
+                            and "static.xx.fbcdn.net" not in res.url
+                            and "/images/vault/" not in res.url
+                            and "logo" not in res.url.lower()
+                            and "icon" not in res.url.lower()
+                            and not res.url.endswith("header-background-2x.png"),
+                            timeout=10000,
+                        )
+                        logger.info("Found additional network image response")
+                    except:
+                        logger.debug(
+                            "No more network image responses found within timeout"
+                        )
+                        break
 
             await browser.close()
 
-            logger.info(f"✅ Total images found: {len(image_sources)}")
-            return list(image_sources)
+            # Convert to list and limit to max_images if specified
+            carousel_images = list(image_urls)
+            if max_images:
+                carousel_images = carousel_images[:max_images]
+
+            logger.debug(
+                f"Found {len(image_urls)} total images, selected {len(carousel_images)}"
+            )
+            
+            if carousel_images:
+                carousel_images =  sorted(carousel_images)
+                return carousel_images[1:]
+            return None
 
     except Exception as e:
         logger.error(f"Error extracting images from iframe {iframe_url}: {e}")
-        return []
+        return None
