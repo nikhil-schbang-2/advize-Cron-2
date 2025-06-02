@@ -1173,10 +1173,7 @@ def update_ad_insights():
     try:
         account_query = """SELECT account_id FROM dim_account WHERE is_active = true"""
         result = db.execute(account_query).fetchall()
-<<<<<<< Updated upstream
         # days = [1,7,15,30,90, 180, 365]
-=======
->>>>>>> Stashed changes
         DAYS = 365
 
         for active_account in result:
