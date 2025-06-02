@@ -29,10 +29,6 @@ celery.conf.update(
 celery.conf.beat_schedule = {
     "update-ad-insights": {
         "task": "app.insights_async.update_ad_insights",
-<<<<<<< Updated upstream
-        "schedule": crontab(minute="*/5"),
-=======
-        "schedule": crontab(minute="*"),
->>>>>>> Stashed changes
+        "schedule": crontab(hour=0,minute=0),
     },
 }
