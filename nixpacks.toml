@@ -1,0 +1,9 @@
+[phases.playwright]
+  # Install Playwright browser binaries
+  dependsOn = ['install']
+  cmds = ['/opt/venv/bin/playwright install']
+
+[phases.playwrightdeps]
+  # Install system dependencies for Playwright browsers
+  dependsOn = ['playwright']
+  cmds = ['/opt/venv/bin/playwright install-deps']

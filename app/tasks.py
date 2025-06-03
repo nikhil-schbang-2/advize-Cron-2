@@ -1282,7 +1282,13 @@ def process_ad(db: Database, ad_data: Dict[str, Any], account_id: int) -> Option
     dpa_processed_data = None
     if creative_type == "DPA":
         print("Found creative type DPA. Try to scrape the data from preview", ad_id)
-        dpa_processed_data, creative_type = save_dpa_ads(ad_id, account_id, db)
+        dpa_processed_data, creative_type, hash_id = save_dpa_ads(ad_id, account_id, db)
+        
+        if creative_type == "image":
+            ad_image_hash = hash_id
+        elif creative_type == "video":
+            ad_video_id = hash_id
+
         print("creative_type 12121121", creative_type)
 
     # Upsert for dim_ad
@@ -1337,14 +1343,14 @@ def process_ad(db: Database, ad_data: Dict[str, Any], account_id: int) -> Option
             """
             for process_data in dpa_processed_data:
                 db.execute(card_upsert_query, process_data) 
-        
+
         return ad_id
     except Exception as e:
         print(f"Error upserting ad {ad_id}: {e}")
         return None
 
 
-def fetch_image_from_iframe(ad_id):
+def fetch_url_from_iframe(ad_id):
     meta_asset_link = None
     preview_formats = ["MOBILE_FEED_STANDARD", "INSTAGRAM_STANDARD", "DESKTOP_FEED_STANDARD"]
 
@@ -1506,42 +1512,49 @@ def check_and_update_image_s3(bucket_name, meta_url, image_hash):
 def save_dpa_ads(ad_id, account_id, db: Database):
     try:
         bucket_name = S3_BUCKET_NAME
-        iframe_link = fetch_image_from_iframe(ad_id)
+        iframe_link = fetch_url_from_iframe(ad_id)
         if not iframe_link:
             return ad_id
 
         print("iframe_link >>>>>>", iframe_link)
         meta_urls = asyncio.run(get_carousel_images_from_facebook_iframe(iframe_link)) or []
-        print("meta_urls ====> ", meta_urls)
-        row_to_insert = []
+        
+        if meta_urls:
+            row_to_insert = []
 
-        creative_type = "carousel" if len(meta_urls) > 1 else "unknown"
-        print("creative_type 11", creative_type)
+            creative_type = "carousel" if len(meta_urls) > 1 else "unknown"
+            print("creative_type 11", creative_type)
+            image_hash = None
 
-        for idx, meta_url in enumerate(meta_urls, 1):
-            media_type, image_hash = hash_image_from_url(meta_url)
-            print("media_type is ", media_type)
-            if creative_type is None:
-                creative_type = media_type
+            for idx, meta_url in enumerate(meta_urls, 1):
+                media_type, image_hash = hash_image_from_url(meta_url)
+                print("media_type is ", media_type)
+                if creative_type is None:
+                    creative_type = media_type
 
-            if not image_hash:
-                continue
-            
-            if media_type == "image":
-                s3_image_url = check_and_update_image_s3(bucket_name, meta_url, image_hash)
-                process_image_creative(db, image_hash, s3_image_url, account_id=account_id)
-            
-            elif media_type == "video":
-                print(f"found media type {media_type}")
-                continue
+                if not image_hash:
+                    continue
+                
+                if media_type == "image":
+                    s3_image_url = check_and_update_image_s3(bucket_name, meta_url, image_hash)
+                    process_image_creative(db, image_hash, s3_image_url, account_id=account_id)
+                
+                elif media_type == "video":
+                    print(f"found media type {media_type}")
+                    continue
 
-            
-            if creative_type == "carousel":
-                card_id = str(uuid.uuid4())
-                data = (card_id, int(account_id), ad_id, media_type, None, image_hash, idx,)
-                row_to_insert.append(data)
-        print("creative type ======>", creative_type)
-        return row_to_insert, creative_type
+                
+                if creative_type == "carousel":
+                    card_id = str(uuid.uuid4())
+                    data = (card_id, int(account_id), ad_id, media_type, None, image_hash, idx,)
+                    row_to_insert.append(data)
+            print("creative type ======>", creative_type)
+            return row_to_insert, creative_type, image_hash
+        
+        
+        video_id = fetch_video_from_iframe(ad_id, account_id, db)
+        print("processed video from iframe")
+        return None, "video", video_id
 
     except Exception as error:
         print("error from save dpa function", error)
@@ -1570,159 +1583,55 @@ def identify_content_type(api_response):
 
     return media_type
 
-# def fetch_video_from_iframe(ad_id):
-#     preview_formats = [
-#         "MOBILE_FEED_STANDARD",
-#         "INSTAGRAM_STANDARD",
-#         "DESKTOP_FEED_STANDARD",
-#     ]
+def fetch_video_from_iframe(ad_id, account_id, db: Database):
+    meta_asset_link = fetch_url_from_iframe(ad_id)
+    last_val_result = db.execute("SELECT last_value FROM internal_video_id_seq_big").fetchall()
+    video_id = None
 
-#     max_retries_preview = 5
-#     initial_delay_preview = 60
-#     max_delay_preview = 3600
-#     meta_asset_link = None
+    if last_val_result and len(last_val_result) > 0:
+        video_id = last_val_result[0]["last_value"] + 1
 
-#     print(f"  Trying preview fallback for ad ID: {ad_id}")
-#     preview_base_url = f"https://graph.facebook.com/v22.0/{ad_id}/previews"
+    if meta_asset_link:
+        print(
+            f"Meta asset link found for video. Attempting download and upload to S3."
+        )
+        s3_asset_link = asyncio.run(download_and_upload_video(
+            video_id, meta_asset_link, S3_BUCKET_NAME
+        ))
+        if s3_asset_link:
+            print(f"Video {video_id} successfully uploaded to S3.")
+        else:
+            print(f"Failed to download or upload video {video_id} to S3.")
 
-#     for format in preview_formats:
-#         if meta_asset_link:
-#             break
-
-#         print(f"Trying preview format: {format} for ad ID {ad_id}")
-#         preview_params = {"ad_format": format, "fields": "body"}
-
-#         delay_preview = initial_delay_preview
-#         response_preview = None
-#         last_error_preview = None
-
-#         for attempt_preview in range(max_retries_preview):
-#             try:
-#                 print(
-#                     f"Preview fetch Attempt {attempt_preview + 1}/{max_retries_preview} for format {format}..."
-#                 )
-#                 response_preview = requests.get(
-#                     preview_base_url,
-#                     headers=headers,
-#                     params=preview_params,
-#                     timeout=60,
-#                 )
-#                 response_preview.raise_for_status()
-#                 print(
-#                     f"Preview fetch Attempt {attempt_preview + 1}: Success."
-#                 )
-#                 last_error_preview = None
-
-#                 preview_data = response_preview.json().get("data")
-#                 print(f"==>> preview_data: {preview_data}")
-#                 if (
-#                     preview_data
-#                     and isinstance(preview_data, list)
-#                     and len(preview_data) > 0
-#                 ):
-#                     body = preview_data[0].get("body", "")
-#                     match = re.search(r'src=["\'](.*?)["\']', body)
-#                     if match:
-#                         extracted_url = match.group(1)
-#                         if extracted_url:
-#                             decoded_url = extracted_url.replace(
-#                                 "&amp;", "&"
-#                             )
-
-#                             meta_asset_link = decoded_url
-#                             print(
-#                                 f"==>> meta_asset_link: {meta_asset_link}"
-#                             )
-#                             video_source_type = (
-#                                 f"Preview Fallback ({format})"
-#                             )
-#                             print(
-#                                 f"Video asset link obtained from {video_source_type}."
-#                             )
-#                             break
-#                         else:
-#                             print(
-#                                 f"Extracted empty URL from preview body for format {format} using ad {ad_id}. Trying next format."
-#                             )
-#                     else:
-#                         print(
-#                             f"No iframe src found in preview body for format {format} using ad {ad_id}. Trying next format."
-#                         )
-#                 else:
-#                     print(
-#                         f"No data or empty data array in preview response for format {format} using ad {ad_id}. Trying next format."
-#                     )
-
-#                 break
-
-#             except requests.exceptions.Timeout as e:
-#                 print(
-#                     f"Preview fetch Attempt {attempt_preview + 1} timed out. Error: {e}"
-#                 )
-#                 last_error_preview = e
-#             except requests.exceptions.RequestException as e:
-#                 print(
-#                     f"Preview fetch Attempt {attempt_preview + 1} failed. Status: {e.response_preview.status_code if e.response_preview else 'N/A'}. Error: {e}"
-#                 )
-#                 last_error_preview = e
-#                 if (
-#                     e.response_preview is not None
-#                     and e.response_preview.status_code == 429
-#                 ):
-#                     print("Rate limit hit during preview fetch.")
-#             except Exception as e:
-#                 print(
-#                     f"Preview fetch Attempt {attempt_preview + 1} encountered unexpected error: {e}"
-#                 )
-#                 last_error_preview = e
-
-#             if attempt_preview < max_retries_preview - 1:
-#                 print(
-#                     f"Retrying preview fetch in {min(delay_preview, max_delay_preview)} seconds..."
-#                 )
-#                 time.sleep(min(delay_preview, max_delay_preview))
-#                 delay_preview *= 2
-#             else:
-#                 print(
-#                     f"Max retries reached for preview format {format} using ad {ad_id}. Last error: {last_error_preview}"
-#                 )
-
-#     if meta_asset_link:
-#         print(
-#             f"Meta asset link found for video. Attempting download and upload to S3."
-#         )
-#         s3_asset_link = asyncio.run(download_and_upload_video(
-#             video_id, meta_asset_link, S3_BUCKET_NAME
-#         ))
-#         if s3_asset_link:
-#             print(f"Video {video_id} successfully uploaded to S3.")
-#         else:
-#             print(f"Failed to download or upload video {video_id} to S3.")
-
-#         creative_tags = json.dumps(creative_tags_data) if creative_tags_data else "{}"
+        # creative_tags = json.dumps(creative_tags_data) if creative_tags_data else "{}"
 
 
-#     # Upsert for dim_video_creative
-#     upsert_query = """
-#         INSERT INTO dim_video_creative
-#         (video_id, account_id, asset_link, creative_tags, creative_available, creative_tagged)
-#         VALUES (allocate_video_id(%s), %s, %s, %s::jsonb, %s, %s)
-#         ON CONFLICT (video_id) DO UPDATE SET
-#             account_id = EXCLUDED.account_id,
-#             asset_link = COALESCE(EXCLUDED.asset_link, dim_video_creative.asset_link),
-#             creative_available = COALESCE(EXCLUDED.creative_available, dim_video_creative.creative_available),
-#             creative_tags = COALESCE(EXCLUDED.creative_tags, dim_video_creative.creative_tags),
-#             creative_tagged = COALESCE(EXCLUDED.creative_tagged, dim_video_creative.creative_tagged)
-#         """
+    # Upsert for dim_video_creative
+    upsert_query = """
+        INSERT INTO dim_video_creative
+        (video_id, account_id, asset_link, creative_tags, creative_available, creative_tagged)
+        VALUES (allocate_video_id(%s), %s, %s, %s::jsonb, %s, %s)
+        ON CONFLICT (video_id) DO UPDATE SET
+            account_id = EXCLUDED.account_id,
+            asset_link = COALESCE(EXCLUDED.asset_link, dim_video_creative.asset_link),
+            creative_available = COALESCE(EXCLUDED.creative_available, dim_video_creative.creative_available),
+            creative_tags = COALESCE(EXCLUDED.creative_tags, dim_video_creative.creative_tags),
+            creative_tagged = COALESCE(EXCLUDED.creative_tagged, dim_video_creative.creative_tagged)
+        """
 
-#     db.execute(
-#         upsert_query,
-#         (
-#             video_id,
-#             int(account_id),
-#             s3_asset_link,
-#             creative_tags,
-#             bool(s3_asset_link),
-#             bool(creative_tags_data),
-#         ),
-#     )
+    try:
+        db.execute(
+            upsert_query,
+            (
+                video_id,
+                int(account_id),
+                s3_asset_link,
+                "{}",
+                bool(s3_asset_link),
+                False,
+            ),
+        )
+        return video_id
+    except Exception as error:
+        print("Error in process iframe video", str(error))
+        return None
