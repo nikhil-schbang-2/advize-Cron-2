@@ -34,6 +34,6 @@ celery.conf.beat_schedule = {
     },
     # "update-ad-insights": {
     #     "task": "app.meta_ads_library.meta_library_ads_sync",
-    #     "schedule": crontab(minute="*/10"),
+    #     "schedule": crontab(minute="*"),
     # },
 }

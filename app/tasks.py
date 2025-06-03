@@ -1280,7 +1280,7 @@ def process_ad(db: Database, ad_data: Dict[str, Any], account_id: int) -> Option
         is_available = False
 
     dpa_processed_data = None
-    if creative_type == "DPA":
+    if creative_type == "DPA" or creative_type == "unknown":
         print("Found creative type DPA. Try to scrape the data from preview", ad_id)
         dpa_processed_data, creative_type, hash_id = save_dpa_ads(ad_id, account_id, db)
         

@@ -52,3 +52,11 @@ APIFY_TOKEN = os.getenv("APIFY_TOKEN", "apify_api_eEAWIIBVlGdguTukdYxKPJZb878pI0
 TASK_ID = os.getenv("TASK_ID","nikhil.pandey~facebook-ads-scraper-task")
 
 COMPETITOR_BUCKET_NAME = "competitormetacreativebucket"
+
+# Facebook Ads library
+ADS_LIBRARY = "https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country={}&is_targeted_country=false&media_type=all&search_type=page&view_all_page_id={}"
+START_RUN_URL = "https://api.apify.com/v2/actor-tasks/{}/runs?token={}"
+RUN_STATUS_URL = "https://api.apify.com/v2/actor-runs/{}?token={}"
+APIFY_DATABASE_URL = "https://api.apify.com/v2/datasets/{}/items?token={}&clean=true"
+WITHOUT_LOCATION = f"https://{COMPETITOR_BUCKET_NAME}.s3.amazonaws.com/{{}}"
+WITH_LOCATION = f"https://{COMPETITOR_BUCKET_NAME}.s3-{{}}.amazonaws.com/{{}}"

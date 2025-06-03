@@ -12,22 +12,26 @@ from database.db import Database
 import sys
 from app.celery_app import celery
 from botocore.exceptions import ClientError
-from app.config import APIFY_TOKEN, TASK_ID, COMPETITOR_BUCKET_NAME
+from app.config import (
+    APIFY_DATABASE_URL,
+    APIFY_TOKEN,
+    RUN_STATUS_URL,
+    START_RUN_URL,
+    TASK_ID,
+    COMPETITOR_BUCKET_NAME,
+    ADS_LIBRARY,
+    WITHOUT_LOCATION,
+    WITH_LOCATION,
+)
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-# API credentials
-# APIFY_TOKEN = "apify_api_eEAWIIBVlGdguTukdYxKPJZb878pI04c75e8"
-# TASK_ID = "nikhil.pandey~facebook-ads-scraper-task"
-
-# COMPETITOR_BUCKET_NAME = "competitormetacreativebucket"
 
 
 def start_facebook_ads_scraper(page_id, country="IN", limit=10):
     """Start the Facebook Ads Scraper task with custom input"""
 
     # Construct Facebook Ads Library URL
-    fb_url = f"https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country={country}&is_targeted_country=false&media_type=all&search_type=page&view_all_page_id={page_id}"
+    fb_url = ADS_LIBRARY.format(country, page_id)
 
     # Create input payload exactly matching the working format
     input_payload = {
@@ -39,9 +43,7 @@ def start_facebook_ads_scraper(page_id, country="IN", limit=10):
     }
 
     # Start the task
-    start_run_url = (
-        f"https://api.apify.com/v2/actor-tasks/{TASK_ID}/runs?token={APIFY_TOKEN}"
-    )
+    start_run_url = START_RUN_URL.format(TASK_ID, APIFY_TOKEN)
     response = requests.post(start_run_url, json=input_payload)
     response.raise_for_status()
 
@@ -57,9 +59,7 @@ def wait_for_completion(run_id):
     status = "RUNNING"
     while status in ["RUNNING", "READY", "PENDING"]:
         time.sleep(5)
-        run_status_url = (
-            f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_TOKEN}"
-        )
+        run_status_url = RUN_STATUS_URL.format(run_id, APIFY_TOKEN)
         run_status = requests.get(run_status_url).json()
         status = run_status["data"]["status"]
 
@@ -69,11 +69,11 @@ def wait_for_completion(run_id):
 def download_dataset(run_id):
     """Download the results dataset"""
 
-    run_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_TOKEN}"
+    run_url = RUN_STATUS_URL.format(run_id, APIFY_TOKEN)
     run_info = requests.get(run_url).json()
 
     dataset_id = run_info["data"]["defaultDatasetId"]
-    dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={APIFY_TOKEN}&clean=true"
+    dataset_url = APIFY_DATABASE_URL.format(dataset_id, APIFY_TOKEN)
 
     dataset = requests.get(dataset_url).json()
     return dataset
@@ -164,9 +164,9 @@ def extract_ad_info(ad_data):
                 "is_active": is_active,
                 "end_date": datetime.fromtimestamp(end_date),
                 "creative_type": creative_type,
-                "video_hash"
-                if creative_type == "Video"
-                else "image_hash": creative_hash,
+                (
+                    "video_hash" if creative_type == "Video" else "image_hash"
+                ): creative_hash,
                 # "displayFormat": display_format,
                 # "text": ad_text.strip() if ad_text else "",
                 "media_url": media_url,
@@ -233,21 +233,21 @@ def download_video(url, filename):
                 "LocationConstraint"
             ]
             if s3_location is None:
-                s3_url = (
-                    f"https://{COMPETITOR_BUCKET_NAME}.s3.amazonaws.com/{already_exists_video}"
-                )
+                s3_url = WITHOUT_LOCATION.format(already_exists_video)
                 return s3_url
             else:
-                s3_url = f"https://{COMPETITOR_BUCKET_NAME}.s3-{s3_location}.amazonaws.com/{already_exists_video}"
+                s3_url = WITH_LOCATION.format(s3_location, already_exists_video)
                 return s3_url
 
         s3.upload_fileobj(video_data, COMPETITOR_BUCKET_NAME, s3_key_with_extension)
 
-        s3_location = s3.get_bucket_location(Bucket=COMPETITOR_BUCKET_NAME)["LocationConstraint"]
+        s3_location = s3.get_bucket_location(Bucket=COMPETITOR_BUCKET_NAME)[
+            "LocationConstraint"
+        ]
         if s3_location is None:
-            s3_url = f"https://{COMPETITOR_BUCKET_NAME}.s3.amazonaws.com/{s3_key_with_extension}"
+            s3_url = WITHOUT_LOCATION.format(s3_key_with_extension)
         else:
-            s3_url = f"https://{COMPETITOR_BUCKET_NAME}.s3-{s3_location}.amazonaws.com/{s3_key_with_extension}"
+            s3_url = WITH_LOCATION.format(s3_location, s3_key_with_extension)
 
         print(f"Video uploaded to S3: {s3_url}")
         return s3_url
@@ -279,7 +279,7 @@ def download_image(url, filename):
         print(f"==>> s3_key_with_extension: {s3_key_with_extension}")
         s3 = boto3.client("s3")
         already_exists_image = None
-        
+
         # Upload to S3
         try:
             s3.head_object(Bucket=COMPETITOR_BUCKET_NAME, Key=s3_key_with_extension)
@@ -298,21 +298,21 @@ def download_image(url, filename):
                 "LocationConstraint"
             ]
             if s3_location is None:
-                s3_url = (
-                    f"https://{COMPETITOR_BUCKET_NAME}.s3.amazonaws.com/{already_exists_image}"
-                )
+                s3_url =  WITHOUT_LOCATION.format(already_exists_image)
                 return s3_url
             else:
-                s3_url = f"https://{COMPETITOR_BUCKET_NAME}.s3-{s3_location}.amazonaws.com/{already_exists_image}"
+                s3_url = WITH_LOCATION.format(s3_location, already_exists_image)
                 return s3_url
 
         s3.upload_fileobj(image_data, COMPETITOR_BUCKET_NAME, s3_key_with_extension)
 
-        s3_location = s3.get_bucket_location(Bucket=COMPETITOR_BUCKET_NAME)["LocationConstraint"]
+        s3_location = s3.get_bucket_location(Bucket=COMPETITOR_BUCKET_NAME)[
+            "LocationConstraint"
+        ]
         if s3_location is None:
-            s3_url = f"https://{COMPETITOR_BUCKET_NAME}.s3.amazonaws.com/{s3_key_with_extension}"
+            s3_url =  WITHOUT_LOCATION.format(s3_key_with_extension)
         else:
-            s3_url = f"https://{COMPETITOR_BUCKET_NAME}.s3-{s3_location}.amazonaws.com/{s3_key_with_extension}"
+            s3_url = WITH_LOCATION.format(s3_location, s3_key_with_extension)
 
         print(f"Video uploaded to S3: {s3_url}")
         return s3_url
@@ -329,12 +329,12 @@ def generate_hash(input_string):
 
 
 @celery.task
-def meta_library_ads_sync(page_id, country, limit):
+def meta_library_ads_sync():
     print("starting the Facebook Ads Scraper...", datetime.now())
     # Set your target page ID and other parameters
-    # page_id = "102396233156564"
-    # country = "IN"
-    # limit = 20  # Max number of results to fetch
+    page_id = "102396233156564"
+    country = "IN"
+    limit = 20  # Max number of results to fetch
 
     # Initialize the database
     db = Database()
@@ -347,10 +347,10 @@ def meta_library_ads_sync(page_id, country, limit):
 
     # Download results
     dataset = download_dataset(run_id)
-
+    print("dataset", dataset)
     # Extract and clean data
     cleaned_ads = extract_ad_info(dataset)
-
+    # print("cleaned_ads", cleaned_ads)
     # Print stats
     if cleaned_ads:
         print("Started processing in database ...", datetime.now())
@@ -392,6 +392,7 @@ def meta_library_ads_sync(page_id, country, limit):
             for row in cleaned_ads
         ]
 
+        print("values", values)
         db_update_status = db.bulk_execute_values(query, values)
         if db_update_status:
             print("Data inserted/updated successfully in the database.", datetime.now())
@@ -434,9 +435,7 @@ def meta_library_ads_sync(page_id, country, limit):
                         )
                         if cursor:
                             cursor.close()
-                            print(
-                                f"Video URL inserted into the database: {video_s3_url}"
-                            )
+                            print(f"Video URL inserted into the database: {video_s3_url}")
                         print(f"Video URL inserted into the database: {video_s3_url}")
 
                     # Only download a few videos for testing
@@ -444,7 +443,7 @@ def meta_library_ads_sync(page_id, country, limit):
                         break
 
                 if ad["creative_type"] == "Image" and ad["media_url"]:
-                    filename_hash = ad['image_hash']
+                    filename_hash = ad["image_hash"]
                     # Check if the video already exists in the database
                     cursor = db.execute(
                         "SELECT asset_link FROM dim_image_creative_scraped WHERE image_hash = %s",
@@ -465,7 +464,7 @@ def meta_library_ads_sync(page_id, country, limit):
                                 page_id,
                                 asset_link
                             ) VALUES (%s, %s, %s)
-                            ON CONFLICT (video_hash) DO NOTHING
+                            ON CONFLICT (image_hash) DO NOTHING
                             """
                         cursor = db.execute(
                             query=query,
@@ -486,9 +485,8 @@ def meta_library_ads_sync(page_id, country, limit):
                     # Only download a few images for testing
                     if image_count >= 3:
                         break
-            print(
-                "Data inserted/updated successfully in the database.", db_update_status
-            )
+
+            print("Data inserted/updated successfully in the database.", db_update_status)
         else:
             print("Failed to insert/update data in the database.", db_update_status)
 
