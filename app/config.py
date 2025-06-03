@@ -19,7 +19,7 @@ DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NA
 
 
 # AWS SQS Configuration
-AWS_REGION = os.environ.get("AWS_REGION")  # e.g., 'us-east-1'
+AWS_REGION = os.environ.get("AWS_REGION")
 SQS_QUEUE_URL = os.environ.get(
     "SQS_QUEUE_URL", "https://sqs.ap-south-1.amazonaws.com/245681210311/image_queue"
 )

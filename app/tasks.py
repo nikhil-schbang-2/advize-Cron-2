@@ -1281,7 +1281,7 @@ def process_ad(db: Database, ad_data: Dict[str, Any], account_id: int) -> Option
 
     dpa_processed_data = None
     if creative_type == "DPA":
-        print("Found creative type DPA. Try to scrape the data from preview")
+        print("Found creative type DPA. Try to scrape the data from preview", ad_id)
         dpa_processed_data, creative_type = save_dpa_ads(ad_id, account_id, db)
         
 
@@ -1514,7 +1514,7 @@ def save_dpa_ads(ad_id, account_id, db: Database):
         row_to_insert = []
 
         creative_type = "carousel" if len(meta_urls) > 1 else None
-
+        print("creative_type 11", creative_type)
         for idx, meta_url in enumerate(meta_urls, 1):
             media_type, image_hash = hash_image_from_url(meta_url)
 
@@ -1537,7 +1537,7 @@ def save_dpa_ads(ad_id, account_id, db: Database):
                 card_id = str(uuid.uuid4())
                 data = (card_id, int(account_id), ad_id, media_type, None, image_hash, idx,)
                 row_to_insert.append(data)
-            
+        print("creative type ======>", creative_type)
         return row_to_insert, creative_type
 
     except Exception as error:
