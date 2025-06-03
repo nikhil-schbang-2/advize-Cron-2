@@ -46,3 +46,9 @@ VIDEO_URL_COLUMN = "asset_link"
 # celery
 CELERY_BROKER = os.getenv("CELERY_BROKER","redis://localhost:6379/0")
 CELERY_BACKEND = os.getenv("CELERY_BACKEND","redis://localhost:6379/0")
+
+# Apify cred
+APIFY_TOKEN = os.getenv("APIFY_TOKEN", "apify_api_eEAWIIBVlGdguTukdYxKPJZb878pI04c75e8")
+TASK_ID = os.getenv("TASK_ID","nikhil.pandey~facebook-ads-scraper-task")
+
+COMPETITOR_BUCKET_NAME = "competitormetacreativebucket"

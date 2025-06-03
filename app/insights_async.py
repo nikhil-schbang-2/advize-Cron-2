@@ -128,6 +128,75 @@ def fetch_all_insights(ad_account_id, params, breakdowns=None, limit=100):
         return None
 
 
+import time
+import requests
+
+def fetch_facebook_insights_async(
+    access_token: str,
+    ad_account_id: str,
+    params,
+    max_retries: int = 6,
+) -> list:
+    """
+    Fetch Facebook Ads Insights using the Async API with exponential backoff.
+
+    Args:
+        access_token (str): Facebook Graph API access token.
+        ad_account_id (str): Ad account ID (with 'act_' prefix).
+        fields (str): Comma-separated string of fields to retrieve.
+        time_range (dict): Dict with 'since' and 'until' dates.
+        level (str): Reporting level, default is "ad".
+        limit (int): Page size for results.
+        max_retries (int): Max backoff retries before failure.
+
+    Returns:
+        list: Flattened list of insights data.
+    """
+    base_url = f"https://graph.facebook.com/v22.0"
+    
+    # Step 1: Start async job
+    start_resp = requests.post(
+        f"{base_url}/act_{ad_account_id}/insights",
+        params=params,
+    )
+    start_resp.raise_for_status()
+    report_run_id = start_resp.json()["report_run_id"]
+
+    # Step 2: Poll with exponential backoff
+    retry = 0
+    while retry < max_retries:
+        status_resp = requests.get(
+            f"{base_url}/{report_run_id}",
+            params={"access_token": access_token},
+        )
+        status_resp.raise_for_status()
+        status_data = status_resp.json()
+        status = status_data.get("async_status")
+
+        if status == "Job Completed":
+            break
+        elif status == "Job Failed":
+            raise RuntimeError("Facebook async insights job failed.")
+        
+        wait_time = 2 ** retry  # Exponential backoff
+        time.sleep(wait_time)
+        retry += 1
+    else:
+        raise TimeoutError("Async insights job did not complete in time.")
+
+    # Step 3: Fetch results
+    results = []
+    next_url = f"{base_url}/{report_run_id}/insights?access_token={access_token}"
+    while next_url:
+        data_resp = requests.get(next_url)
+        data_resp.raise_for_status()
+        data = data_resp.json()
+        results.extend(data.get("data", []))
+        next_url = data.get("paging", {}).get("next")
+
+    return results
+
+
 def fetch_ads_in_batches(
     ad_ids: List[str], fields: List[str] = [], batch_size: int = 50
 ):
@@ -1219,6 +1288,7 @@ def update_ad_insights():
 
                 # Query parameters
                 params = {
+                    "access_token": ACCESS_TOKEN,
                     "level": "ad",
                     "fields": [
                         "ad_id",
@@ -1233,10 +1303,14 @@ def update_ad_insights():
                     ],
                     "time_range": json.dumps(FACT_FETCH_TIME_RANGE),
                     "action_breakdowns": json.dumps(["action_type"]),
+                    "limit": 1000,
+                    "async": "true",
                 }
 
                 # Fetch insights
+                print("started insigths fetch -----")
                 all_insights_data = fetch_all_insights(f"act_{account_id}", params, [])
+                # all_insights_data = fetch_facebook_insights_async(ACCESS_TOKEN, account_id, params)
                 print(f"==>> all_insights_data: {len(all_insights_data)}")
                 unique_ad_ids = set(
                     row["ad_id"] for row in all_insights_data if row.get("ad_id")

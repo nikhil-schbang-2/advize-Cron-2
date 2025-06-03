@@ -1283,7 +1283,7 @@ def process_ad(db: Database, ad_data: Dict[str, Any], account_id: int) -> Option
     if creative_type == "DPA":
         print("Found creative type DPA. Try to scrape the data from preview", ad_id)
         dpa_processed_data, creative_type = save_dpa_ads(ad_id, account_id, db)
-        
+        print("creative_type 12121121", creative_type)
 
     # Upsert for dim_ad
     upsert_query = """
@@ -1515,15 +1515,16 @@ def save_dpa_ads(ad_id, account_id, db: Database):
 
         creative_type = "carousel" if len(meta_urls) > 1 else None
         print("creative_type 11", creative_type)
+
         for idx, meta_url in enumerate(meta_urls, 1):
             media_type, image_hash = hash_image_from_url(meta_url)
+            print("media_type is ", media_type)
+            if creative_type is None:
+                creative_type = media_type
 
             if not image_hash:
                 continue
             
-            if creative_type is None:
-                creative_type = media_type
-
             if media_type == "image":
                 s3_image_url = check_and_update_image_s3(bucket_name, meta_url, image_hash)
                 process_image_creative(db, image_hash, s3_image_url, account_id=account_id)
@@ -1549,18 +1550,23 @@ def hash_image_from_url(image_url):
     response = requests.get(image_url)
     response.raise_for_status()
 
-    content_type = response.headers.get("Content-Type", "")
+    media_type = identify_content_type(response)
+    
+    content_bytes = response.content
+    return media_type, hashlib.md5(content_bytes).hexdigest()
+
+
+def identify_content_type(api_response):
+    content_type = api_response.headers.get("Content-Type", "")
     
     if content_type.startswith("image/"):
         media_type = "image"
     elif content_type.startswith("video/"):
         media_type = "video"
     else:
-        raise ValueError(f"Unsupported content type: {content_type}")
-    
-    content_bytes = response.content
-    return media_type, hashlib.md5(content_bytes).hexdigest()
+        media_type = "unknown"
 
+    return media_type
 
 # def fetch_video_from_iframe(ad_id):
 #     preview_formats = [

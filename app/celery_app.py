@@ -4,6 +4,7 @@ from app.config import CELERY_BROKER, CELERY_BACKEND
 
 INCLUDE = [
     "app.insights_async",
+    "app.meta_ads_library"
 ]
 
 celery = Celery(
@@ -29,6 +30,10 @@ celery.conf.update(
 celery.conf.beat_schedule = {
     "update-ad-insights": {
         "task": "app.insights_async.update_ad_insights",
-        "schedule": crontab(minute="*/10"),
+        "schedule": crontab(minute="*"),
     },
+    # "update-ad-insights": {
+    #     "task": "app.meta_ads_library.meta_library_ads_sync",
+    #     "schedule": crontab(minute="*/10"),
+    # },
 }
