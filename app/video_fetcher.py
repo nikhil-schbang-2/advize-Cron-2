@@ -4,7 +4,8 @@ import logging
 import json
 import re
 from playwright.async_api import async_playwright, Route, Response
-from typing import Optional, List
+from urllib.parse import urlparse
+from typing import Optional  # Keep Optional for type hinting return value
 
 # Set up logging for this module
 logging.basicConfig(
@@ -188,18 +189,38 @@ async def get_video_from_facebook_iframe(iframe_url: str) -> Optional[str]:
 
 async def get_main_image_from_facebook_iframe(iframe_url: str) -> Optional[str]:
     """
-    Extracts the main thumbnail image from a Facebook iframe URL.
+    Extracts the main thumbnail image from a Facebook iframe URL, focusing on network
+    responses with content-type: image/* (Network tab initiator 'image/').
 
     Args:
         iframe_url (str): The Facebook iframe preview URL.
 
     Returns:
-        str or None: URL of the best thumbnail image, or None if not found.
+        Optional[str]: URL of the main thumbnail image, or None if not found.
     """
-    image_sources = set()
+    image_sources = []
     fb_ads_images = []
-    og_image = None
-    best_image = None
+
+    async def capture_images(response: Response) -> None:
+        """Capture images from network responses with content-type: image/*."""
+        url = response.url
+        content_type = response.headers.get("content-type", "").lower()
+
+        try:
+            if "image/" in content_type and re.search(
+                r"\.(jpg|jpeg|png|webp|gif|avif)", url, re.I
+            ):
+                if "logo" not in url.lower() and "icon" not in url.lower():
+                    logger.info(f"Captured image: {url} (content-type: {content_type})")
+                    image_sources.append(
+                        (url, response.headers.get("content-length", 0))
+                    )
+                    if "business.facebook.com/ads/image" in url or "fbcdn.net" in url:
+                        fb_ads_images.append(
+                            (url, response.headers.get("content-length", 0))
+                        )
+        except Exception as e:
+            logger.debug(f"Error processing response: {url} - {e}")
 
     try:
         async with async_playwright() as p:
@@ -212,53 +233,7 @@ async def get_main_image_from_facebook_iframe(iframe_url: str) -> Optional[str]:
             )
             page = await context.new_page()
 
-            await page.route("**/*", lambda route: route.continue_())
-
-            async def capture_images(response):
-                url = response.url
-                content_type = response.headers.get("content-type", "")
-
-                try:
-                    if "image/" in content_type or re.search(
-                        r"\.(jpg|jpeg|png|webp|gif)", url, re.I
-                    ):
-                        if "logo" not in url.lower() and "icon" not in url.lower():
-                            logger.info(f"Image via network: {url}")
-                            image_sources.add(url)
-                            if "business.facebook.com/ads/image" in url:
-                                fb_ads_images.append(url)
-
-                    if (
-                        "application/json" in content_type
-                        or "javascript" in content_type
-                    ):
-                        body = await response.text()
-
-                        matches = re.findall(
-                            r'(https?://[^"\']+\.(jpg|jpeg|png|webp|gif))', body, re.I
-                        )
-                        for match in matches:
-                            img_url = match[0].replace(r"\/", "/")
-                            if (
-                                "logo" not in img_url.lower()
-                                and "icon" not in img_url.lower()
-                            ):
-                                image_sources.add(img_url)
-                                if "business.facebook.com/ads/image" in img_url:
-                                    fb_ads_images.append(img_url)
-
-                        thumb_match = re.search(
-                            r'"preferred_thumbnail":{"uri":"([^"]+)"', body
-                        )
-                        if thumb_match:
-                            thumb_url = thumb_match.group(1).replace(r"\/", "/")
-                            image_sources.add(thumb_url)
-                            if "business.facebook.com/ads/image" in thumb_url:
-                                fb_ads_images.append(thumb_url)
-
-                except Exception as e:
-                    logger.debug(f"Error parsing response: {url} - {e}")
-
+            # Capture all network responses
             page.on(
                 "response",
                 lambda response: asyncio.create_task(capture_images(response)),
@@ -266,79 +241,44 @@ async def get_main_image_from_facebook_iframe(iframe_url: str) -> Optional[str]:
 
             logger.info(f"Navigating to: {iframe_url}")
             await page.goto(iframe_url, timeout=90000, wait_until="load")
-            await page.wait_for_load_state("networkidle", timeout=30000)
 
-            # og:image tag
+            # Wait for image-related network requests explicitly
             try:
-                og_image = await page.get_attribute(
-                    'meta[property="og:image"]', "content"
+                await page.wait_for_response(
+                    lambda res: "image/" in res.headers.get("content-type", "").lower()
+                    and (
+                        "business.facebook.com/ads/image" in res.url
+                        or "fbcdn.net" in res.url
+                    ),
+                    timeout=15000,
                 )
-                if og_image:
-                    image_sources.add(og_image)
-                    if "business.facebook.com/ads/image" in og_image:
-                        fb_ads_images.append(og_image)
+                logger.info("Found image response matching criteria")
             except:
-                pass
+                logger.warning(
+                    "No specific image response found within timeout, falling back to networkidle"
+                )
 
-            # <img> tags
-            for img in await page.query_selector_all("img"):
-                src = await img.get_attribute("src")
-                if src and "logo" not in src.lower() and "icon" not in src.lower():
-                    image_sources.add(src)
-                    if "business.facebook.com/ads/image" in src:
-                        fb_ads_images.append(src)
-
-            # CSS background images
-            bg_images = await page.evaluate("""() => {
-                const images = new Set();
-                document.querySelectorAll('*').forEach(el => {
-                    const bg = window.getComputedStyle(el).backgroundImage;
-                    if (bg && bg.startsWith('url(')) {
-                        const url = bg.slice(4, -1).replace(/["']/g, "");
-                        if (url.startsWith('http')) images.add(url);
-                    }
-                });
-                return Array.from(images);
-            }""")
-            for bg in bg_images:
-                image_sources.add(bg)
-                if "business.facebook.com/ads/image" in bg:
-                    fb_ads_images.append(bg)
-
-            # Thumbnail-like classes
-            thumb_candidates = await page.evaluate("""() => {
-                const found = [];
-                document.querySelectorAll('img, div').forEach(el => {
-                    const cls = el.className || "";
-                    const src = el.getAttribute('src');
-                    const bg = window.getComputedStyle(el).backgroundImage;
-                    if (/thumbnail|poster|preview|cover/i.test(cls)) {
-                        if (src && src.startsWith('http')) found.push(src);
-                        if (bg && bg.startsWith('url(')) {
-                            found.push(bg.slice(4, -1).replace(/["']/g, ""));
-                        }
-                    }
-                });
-                return found;
-            }""")
-            for thumb in thumb_candidates:
-                image_sources.add(thumb)
-                if "business.facebook.com/ads/image" in thumb:
-                    fb_ads_images.append(thumb)
+            # Wait for additional network activity
+            await page.wait_for_load_state("networkidle", timeout=30000)
 
             await browser.close()
 
-            # Prefer images with /ads/image
+            # Sort images by content-length (larger images are likely thumbnails)
+            fb_ads_images.sort(key=lambda x: int(x[1] or 0), reverse=True)
+            image_sources.sort(key=lambda x: int(x[1] or 0), reverse=True)
+
+            # Select the best image
             if fb_ads_images:
-                best_image = fb_ads_images[0]
-            elif og_image:
-                best_image = og_image
+                best_image = fb_ads_images[0][0]
             elif image_sources:
-                # Prioritize jpgs
-                jpgs = [img for img in image_sources if img.lower().endswith(".jpg")]
-                best_image = jpgs[0] if jpgs else list(image_sources)[0]
+                best_image = image_sources[0][0]
+            else:
+                best_image = None
 
             logger.info(f"✅ Best image selected: {best_image}")
+            logger.debug(
+                f"Found {len(fb_ads_images)} ad images and {len(image_sources)} total images"
+            )
             return best_image
 
     except Exception as e:
