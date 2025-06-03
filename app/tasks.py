@@ -1510,10 +1510,12 @@ def save_dpa_ads(ad_id, account_id, db: Database):
         if not iframe_link:
             return ad_id
 
+        print("iframe_link >>>>>>", iframe_link)
         meta_urls = asyncio.run(get_carousel_images_from_facebook_iframe(iframe_link)) or []
+        print("meta_urls ====> ", meta_urls)
         row_to_insert = []
 
-        creative_type = "carousel" if len(meta_urls) > 1 else None
+        creative_type = "carousel" if len(meta_urls) > 1 else "unknown"
         print("creative_type 11", creative_type)
 
         for idx, meta_url in enumerate(meta_urls, 1):
