@@ -74,7 +74,6 @@ def actor_dataset_items(run_id):
 
 def media_scrapper(iframe_url, media_type = "video"):
     try:
-        iframe_url = "https://business.facebook.com/ads/api/preview_iframe.php?d=AQJht1n186vjihQ0y9V0t9Nb775JTGzjkULv5x_AOAcLgazwUiAKELSvHXZHiHzYWJoXv6mRe4SvuUvypCsSiFFen2927ZjGSrOBawNsGlZxUhkMMh9euheiPpfKCEBrsaJpYETmjO6ym3O93BKWlL3H01XVFSAZ4FsuKvaVRRHANnGPvdMp-ILwUK0wg9PUYUS4Y_OW4ODlQKsXvTu_Pl-vpKWs_KmIZ6LXRwdWxOdYZrN99MbUw0ovPdZUaIzC8U7kB4OSivv9EmwZsHFPUQihYm0yzTaaatItWB_Ea4ogisgZp40vKF-9YQyq_PYLaTg0q-KKCgBoR5fGGadyPKGAQe_zp4BymvSFhy6HbVr6QhhQ83cHYOUnF8HaYfLV1YgTpsEoIXK6ubgAjzUV2kv6MiyLmueSAn3NFdoxW7T6wTkc59VTJKfKuGyXwh_BOAM&t=AQJUgsrzH_fujV7f0as"
         run_id = start_apify_actor(iframe_url, media_type)
 
         dataset = actor_dataset_items(run_id)
