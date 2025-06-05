@@ -22,7 +22,6 @@ from typing import List, Dict, Any, Set
 import psycopg2 as psy
 
 from app.config import META_API_KEY, S3_BUCKET_NAME
-from app.video_fetcher import get_carousel_images_from_facebook_iframe
 from database.db import Database
 from app.fact_table import upsert_dimension
 from app.tasks import (
@@ -629,6 +628,7 @@ def save_ad_creatives(all_ad_data, account_id, db: Database):
             s3_url = download_and_upload_image(
                 image_hash, meta_url, int(ad_id_str), S3_BUCKET_NAME
             )
+            print("s3_url", s3_url)
             if s3_url:
                 s3_url_map[image_hash] = s3_url
             else:
@@ -1246,10 +1246,9 @@ def update_ad_insights():
                 unique_ad_ids = set(
                     row["ad_id"] for row in all_insights_data if row.get("ad_id")
                 )
-
                 delete_ad_and_creatives(list(unique_ad_ids), account_id, db)
 
-                # Filter ads data
+                #Filter ads data
                 ads_data = filter_ads_data(ACCESS_TOKEN, account_id, 1)
                 saved_creative_data = save_ad_creatives(ads_data, account_id, db)
                 ad_id_to_skip = saved_creative_data.get("unknow_creative_ad_id") or []
@@ -1277,7 +1276,6 @@ def update_ad_insights():
                     ad_id_to_skip,
                     db,
                 )
-                print("Unknown ads ids - ", ad_id_to_skip)
                 if rows_to_insert:
                     upsert_partition_atomic(new_table, rows_to_insert, db)
                     atomic_swap(final_table=final_table, new_table=new_table, account_id=account_id, db=db)

@@ -16,6 +16,7 @@ import boto3
 import io
 from botocore.exceptions import ClientError
 from app.celery_app import celery
+from test_code import media_scrapper
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, BASE_DIR)
@@ -420,7 +421,9 @@ def download_and_upload_image(
             return None
 
         try:
-            final_image_url = get_main_image_from_facebook_iframe(meta_asset_link)
+            final_image_url = media_scrapper(meta_asset_link, media_type="image")
+            # final_image_url = get_main_image_from_facebook_iframe(meta_asset_link)
+            final_image_url = final_image_url["image_url"][0]
             if not final_image_url:
                 print(
                     f"Failed to extract main image URL from preview iframe for image {image_hash}."
@@ -541,7 +544,9 @@ async def download_and_upload_video(
             f"Detected preview iframe URL for video {video_id}. Using Playwright to extract video URL."
         )
         try:
-            final_download_url = await get_video_from_facebook_iframe(video_url)
+            # final_download_url = await get_video_from_facebook_iframe(video_url)
+            final_download_url = media_scrapper(video_url)
+            final_download_url = final_download_url["video_url"]
             if final_download_url:
                 print(
                     f"Successfully extracted video URL using Playwright for video {video_id}: {final_download_url}"
@@ -985,7 +990,7 @@ def process_carousel_creative(
             template_data["child_attachments"], list
         ):
             child_attachments = template_data["child_attachments"]
-
+    
     if not child_attachments:
         return True
 
@@ -1517,7 +1522,8 @@ def save_dpa_ads(ad_id, account_id, db: Database):
             return ad_id
 
         print("iframe_link >>>>>>", iframe_link)
-        meta_urls = asyncio.run(get_carousel_images_from_facebook_iframe(iframe_link)) or []
+        media_urls = media_scrapper(iframe_link, media_type="image")
+        meta_urls = media_urls["image_url"]
         
         if meta_urls:
             row_to_insert = []

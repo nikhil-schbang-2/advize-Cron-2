@@ -36,13 +36,14 @@ def start_facebook_ads_scraper(page_id, country="IN", limit=10):
     # Create input payload exactly matching the working format
     input_payload = {
         "activeStatus": "active",
-        "isDetailsPerAd": False,
+        "isDetailsPerAd": True,
         "onlyTotal": False,
         "resultsLimit": limit,
         "startUrls": [{"url": fb_url, "method": "GET"}],
     }
 
     # Start the task
+    #https://api.apify.com/v2/actor-tasks/{}/runs?token…'
     start_run_url = START_RUN_URL.format(TASK_ID, APIFY_TOKEN)
     response = requests.post(start_run_url, json=input_payload)
     response.raise_for_status()
@@ -50,7 +51,6 @@ def start_facebook_ads_scraper(page_id, country="IN", limit=10):
     run = response.json()
     run_id = run["data"]["id"]
 
-    # print(f"▶️ Task started. Run ID: {run_id}")
     return run_id
 
 
@@ -334,7 +334,7 @@ def meta_library_ads_sync():
     # Set your target page ID and other parameters
     page_id = "102396233156564"
     country = "IN"
-    limit = 20  # Max number of results to fetch
+    limit = 100  # Max number of results to fetch
 
     # Initialize the database
     db = Database()
@@ -347,7 +347,8 @@ def meta_library_ads_sync():
 
     # Download results
     dataset = download_dataset(run_id)
-    print("dataset", dataset)
+    with open("raw_fb_ads_data.json", "w", encoding="utf-8") as f:
+        json.dump(dataset, f, indent=2, ensure_ascii=False)
     # Extract and clean data
     cleaned_ads = extract_ad_info(dataset)
     # print("cleaned_ads", cleaned_ads)
